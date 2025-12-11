@@ -88,21 +88,33 @@ g_vec = np.array([0.0, -9.81, 0.0])
 g = g_vec
 
 # =========================
-# 新增：简化 3-DOF 链模型参数
-# （给 2D/3D 动力学用）
+# 简化 3-DOF 链模型参数
+# =========================
+#
+# 这里我们引入三段长度 L1,L2,L3，专门给：
+#   - forwardKinematics / inverseKinematics
+#   - MPC / GUI 画图
+# 使用 **你新的 URDF (model2_simple)** 粗略拟合：
+#
+#  - L1: revolute_lift → revolute_tilt 之间的距离
+#        ≈ sqrt(0.20564^2 + 0.420085^2) ≈ 0.468 m
+#  - L2: revolute_tilt → revolute_scoop 之间的距离
+#        ≈ sqrt(0.2496772^2 + (-0.0024304)^2) ≈ 0.250 m
+#  - L3: tool_body → gripper 末端的合成距离
+#        ≈ 0.104 m
+#
+# 注意：老的 lenBA/lenAL/lenLM 仍然保留，用在原来的
+#       Jacobian / 逆动力学等公式里，不去动它们，
+#       这样旧的 motorTorque 等函数不会崩。
 # =========================
 
-# 三段杆长（关节间距离）：
-# 直接复用老模型的几何：
-#   关节 0→1 : lenBA
-#   关节 1→2 : lenAL
-#   关节 2→3 : lenLM
-L1 = lenBA     # 第一段（Boom）
-L2 = lenAL     # 第二段（Arm）
-L3 = lenLM     # 第三段（Bucket / Tool）
+L1 = 0.468  # 第一段（lift_boom）
+L2 = 0.250  # 第二段（tilt_boom）
+L3 = 0.104  # 第三段（tool_body + gripper）
 
 # 各段质心到本段关节的距离（沿杆方向）
-# 这里用之前算好的质心模长做近似
+# 这里暂时还是用原老模型的质心距离做近似，
+# 如果你以后从 URDF 里精算，可以在这里改。
 lc1 = lenBCoMBoom       # Boom 质心
 lc2 = lenACoMArm        # Arm 质心
 lc3 = lenLCoMBucket     # Bucket 质心
@@ -119,16 +131,7 @@ I3 = moiBucket
 
 # =========================
 # 新增：可旋转底座的转动惯量（yaw）
-# 对应 excavatorModel.py 里的 C.Iz_base
 # =========================
 # 这里给一个合理的近似值，你以后可以用 CAD 或 URDF 精算后替换。
-# 下车 + 上车两块大件的 izz 大概在 0.12 左右（来自 URDF 的示意），
-# 再稍微加一点附件的惯量，取：
 Iz_base = 0.13  # [kg·m^2] 仅作示意，可按需要修改
-
-# 如果你后面要做完全 3D 刚体动力学，通常还会再定义：
-#  - baseMass
-#  - 其他方向惯量 Ix_base, Iy_base 等
-# 到时候可以在这里继续扩展。
-baseMass = 25.0  # 例如: lower_carriage(10kg) + upper_carriage(15kg) 的粗略和
-
+baseMass = 25.0  # 例如: lower_carriage(10kg) + upper_carriage(15kg)

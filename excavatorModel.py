@@ -23,8 +23,8 @@ class DutyCycle(Enum):
 def forwardKinematicsPlanar(q):
     """
     2D 正运动学：q = [alpha, beta, gamma]
-    使用 excavatorConstants 里的连杆长度:
-        lenBA, lenAL, lenLM
+    使用 excavatorConstants 里的简化杆长:
+        L1, L2, L3  <-- 来自 URDF
     返回: [x, z, phi]
     """
     alpha = q[0]
@@ -32,14 +32,14 @@ def forwardKinematicsPlanar(q):
     gamma = q[2]
 
     x = (
-        C.lenBA * csd.cos(alpha)
-        + C.lenAL * csd.cos(alpha + beta)
-        + C.lenLM * csd.cos(alpha + beta + gamma)
+        C.L1 * csd.cos(alpha)
+        + C.L2 * csd.cos(alpha + beta)
+        + C.L3 * csd.cos(alpha + beta + gamma)
     )
     z = (
-        C.lenBA * csd.sin(alpha)
-        + C.lenAL * csd.sin(alpha + beta)
-        + C.lenLM * csd.sin(alpha + beta + gamma)
+        C.L1 * csd.sin(alpha)
+        + C.L2 * csd.sin(alpha + beta)
+        + C.L3 * csd.sin(alpha + beta + gamma)
     )
     phi = alpha + beta + gamma
 
@@ -49,6 +49,44 @@ def forwardKinematicsPlanar(q):
 # 兼容旧项目名字：旧代码里直接叫 forwardKinematics(q)
 def forwardKinematics(q):
     return forwardKinematicsPlanar(q)
+
+
+def inverseKinematics(pose):
+    """
+    2D 逆运动学：给末端 [x,z,phi]，求关节 [alpha,beta,gamma]
+    几何基于 L1,L2,L3（URDF 拟合）
+    """
+    xTip = pose[0]
+    yTip = pose[1]
+    thetaTip = pose[2]
+
+    # 末端回退一段 L3 到 "腕关节"
+    xJointBucket = xTip - C.L3 * csd.cos(thetaTip)
+    yJointBucket = yTip - C.L3 * csd.sin(thetaTip)
+
+    # 二连杆逆解（参考 Siciliano 公式）
+    cosBeta = (
+        xJointBucket ** 2 + yJointBucket ** 2
+        - C.L1 ** 2 - C.L2 ** 2
+    ) / (2 * C.L1 * C.L2)
+    sinBeta = -csd.sqrt(1 - cosBeta ** 2)
+
+    sinAlpha = (
+        (C.L1 + C.L2 * cosBeta) * yJointBucket
+        - C.L2 * sinBeta * xJointBucket
+    ) / (xJointBucket ** 2 + yJointBucket ** 2)
+    cosAlpha = (
+        (C.L1 + C.L2 * cosBeta) * xJointBucket
+        + C.L2 * sinBeta * yJointBucket
+    ) / (xJointBucket ** 2 + yJointBucket ** 2)
+
+    alpha = csd.atan2(sinAlpha, cosAlpha)
+    beta = csd.atan2(sinBeta, cosBeta)
+    gamma = thetaTip - alpha - beta
+
+    return csd.vertcat(alpha, beta, gamma)
+
+
 
 
 def inverseKinematics(pose):

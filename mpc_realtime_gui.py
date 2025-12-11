@@ -13,10 +13,10 @@ from excavatorModel import DutyCycle
 from NLPSolver import NLP, Mode, Ts, integrator
 
 # ============ 2D 模型里用到的 “几何长度” ============
-# 还是沿用你原来 eXactMPC 的 2D 参数，只是用于 3D 可视化
-LEN_BA = float(C.lenBA)   # base → boom
-LEN_AL = float(C.lenAL)   # boom → arm
-LEN_LM = float(C.lenLM)   # arm → tip
+# 这里改成用 URDF 拟合出来的 L1,L2,L3
+LEN_BA = float(C.L1)   # base → lift_boom
+LEN_AL = float(C.L2)   # lift_boom → tilt_boom
+LEN_LM = float(C.L3)   # tilt_boom → tool_body/gripper tip
 TOTAL_LEN = LEN_BA + LEN_AL + LEN_LM
 
 
@@ -145,7 +145,7 @@ class ExcavatorRealtimeGUI:
         self.NSim = int(self.TSim / Ts)
 
         # 目标末端位姿：仍然是 2D [x, z, phi]
-        self.poseDesired = csd.vertcat(3.2, C.yGround, -0.8)
+        self.poseDesired = csd.vertcat(0.6, C.yGround, -0.8)
         self.qDesired = mod.inverseKinematics(self.poseDesired)
 
         # 初始状态：
@@ -153,7 +153,7 @@ class ExcavatorRealtimeGUI:
         yaw0 = math.radians(float(self.yaw_var.get()))
         self.x0 = csd.vertcat(
             yaw0,
-            1.0, -2.2, -1.8,
+            0.5, -0.8, -0.6,   # 你可以根据 URDF 合理调一调初始姿态
             0.0, 0.0, 0.0, 0.0
         )
 
@@ -164,7 +164,7 @@ class ExcavatorRealtimeGUI:
         # 末端轨迹记录
         self.tip_traj = []
 
-        # ========== 状态 / I/O 显示面板 ==========
+        # ========== 状态 / I-O 显示面板 ==========
         info = ttk.LabelFrame(self.root, text="State / I-O Monitor")
         info.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
 
@@ -223,14 +223,12 @@ class ExcavatorRealtimeGUI:
     # ---------- 运动学：计算关节点 3D 坐标 ----------
     def link_positions_3d(self, yaw, q):
         """
-        用原来 2D 模型 [boom, arm, bucket] 在 x–z 平面上的几何，
+        用 2D 模型 [boom, arm, bucket] 在 x–z 平面上的几何，
         然后绕 Z 轴旋转 yaw 放到 3D 世界坐标中显示。
-        yaw  : 底座/上车绕世界 Z 轴的偏航角（来自 MPC 状态）
-        q    : [alpha, beta, gamma] 机械臂三个关节角
         """
         alpha, beta, gamma = float(q[0]), float(q[1]), float(q[2])
 
-        # 在 cabin 坐标系下（Y=0）的 3 个连杆几何
+        # cabin 坐标系下（Y=0）的几何（已经是 URDF 的 L1/L2/L3）
         p0 = np.array([0.0, 0.0, 0.0])
         p1 = p0 + np.array(
             [LEN_BA * math.cos(alpha), 0.0, LEN_BA * math.sin(alpha)]
@@ -260,9 +258,6 @@ class ExcavatorRealtimeGUI:
 
     # ---------- 画一帧 ----------
     def draw_frame(self, x_vec, t):
-        """
-        x_vec: 当前 8 维状态向量（numpy / CasADi / list 都可以）
-        """
         x_arr = np.array(x_vec, dtype=float).reshape(-1)
         yaw = x_arr[0]
         q = x_arr[1:4]
@@ -301,17 +296,14 @@ class ExcavatorRealtimeGUI:
         # 外力方向箭头（在 tip 上）
         force_dir = None
         if self.mode == Mode.LIFT:
-            # LIFT: 模拟重力/吊装，向下
             force_dir = np.array([0.0, 0.0, -1.0])
         elif self.mode == Mode.DIG and len(pts) >= 2:
-            # DIG: 模拟挖掘阻力，沿最后一段连杆反方向
             last_seg = pts[-1] - pts[-2]
             norm = np.linalg.norm(last_seg)
             if norm > 1e-6:
                 force_dir = -last_seg / norm
 
         if force_dir is not None and abs(self.extF) > 1e-6:
-            # 粗略长度缩放：extF=1000 → 约 2 m
             arrow_len = 0.002 * abs(self.extF)
             self.ax.quiver(
                 tip[0], tip[1], tip[2],
@@ -322,7 +314,6 @@ class ExcavatorRealtimeGUI:
             )
 
         L = TOTAL_LEN + 0.5
-        # 画一条“地面线”（z = yGround）
         self.ax.plot(
             [-L, L],
             [0, 0],
@@ -332,7 +323,6 @@ class ExcavatorRealtimeGUI:
             label="ground",
         )
 
-        # 对称范围，方便看底座旋转后的姿态
         self.ax.set_xlim(-L, L)
         self.ax.set_ylim(-L, L)
         self.ax.set_zlim(float(C.yGround) - 0.2, L)
@@ -349,12 +339,6 @@ class ExcavatorRealtimeGUI:
 
     # ---------- 单步 MPC 更新 ----------
     def step_mpc(self):
-        """
-        做一步 MPC：
-        1) 用当前 x 建 NLP
-        2) solveNLP 得到 u0
-        3) 用 motor_commands 推进到 x_{k+1}
-        """
         if self.k >= self.NSim:
             self.status_var.set(f"Finished: k={self.k} >= NSim={self.NSim}")
             return False
@@ -369,8 +353,7 @@ class ExcavatorRealtimeGUI:
             return False
 
         try:
-            # 4-DOF: u0 是 (4,)
-            u0 = sol.value(opti.u[:, 0])
+            u0 = sol.value(opti.u[:, 0])  # (4,)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -379,7 +362,6 @@ class ExcavatorRealtimeGUI:
 
         u0_dm = csd.DM(u0)
 
-        # 用 motor_commands 推进一整个 Ts
         try:
             self.x = motor_commands(sol.value(opti.x[:, 0]), u0_dm)
         except Exception as e:
@@ -398,7 +380,6 @@ class ExcavatorRealtimeGUI:
 
         ok = self.step_mpc()
         if not ok:
-            # 保留前面设置的具体错误信息，不再覆盖
             self.running = False
             self.start_button.config(text="▶ Start (Realtime MPC)")
             return
@@ -434,7 +415,7 @@ class ExcavatorRealtimeGUI:
         yaw0 = math.radians(float(self.yaw_var.get()))
         self.x0 = csd.vertcat(
             yaw0,
-            1.0, -2.2, -1.8,
+            0.5, -0.8, -0.6,
             0.0, 0.0, 0.0, 0.0
         )
         self.x = self.x0
@@ -451,6 +432,7 @@ def main():
     root = tk.Tk()
     app = ExcavatorRealtimeGUI(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
