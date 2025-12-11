@@ -14,10 +14,10 @@ Ts = T / N
 
 def integrator(x, u, dt=Ts):
     """
-    Simple second-order joint-space integrator.
+    Simple second-order joint-space integrator for an n-DOF system.
 
-    State x  = [q1, q2, q3, qDot1, qDot2, qDot3]^T   (6,)
-    Control u = [qDDot1, qDDot2, qDDot3]^T           (3,)
+    State x  = [q0, ..., q_{n-1}, qDot0, ..., qDot_{n-1}]^T   (2n,)
+    Control u = [qDDot0, ..., qDDot_{n-1}]^T                   (n,)
 
     q_next    = q + qDot*dt + 0.5*qDDot*dt^2
     qDot_next = qDot + qDDot*dt
@@ -28,8 +28,15 @@ def integrator(x, u, dt=Ts):
     if isinstance(u, (list, tuple)):
         u = csd.vertcat(*u)
 
-    q = x[0:3]
-    qDot = x[3:6]
+    # Determine number of DOFs from control dimension
+    try:
+        n = int(u.size1())
+    except AttributeError:
+        # Fallback for numpy arrays / python lists
+        n = int(len(u))
+
+    q = x[0:n]
+    qDot = x[n:2 * n]
     qDDot = u
 
     q_next = q + qDot * dt + 0.5 * qDDot * dt ** 2
@@ -65,9 +72,17 @@ class NLP:
         else:
             self.duty_cycle = float(duty_cycle)
 
-        # Dimensions
-        self.nx = 6   # [q1,q2,q3,qDot1,qDot2,qDot3]
-        self.nu = 3   # joint accelerations qDDot
+        
+        
+        # Degrees of freedom:
+        #   0: base yaw
+        #   1-3: boom/arm/bucket joint angles
+        self.ndof = 4
+
+        # State:  x = [q0..q3, qDot0..qDot3]^T  (8,)
+        # Control: u = [qDDot0..qDDot3]^T       (4,)
+        self.nx = 2 * self.ndof
+        self.nu = self.ndof
 
         # Optimisation object
         self.opti = csd.Opti()
@@ -81,15 +96,18 @@ class NLP:
         self.poseDesired = self.opti.parameter(3)
 
         # Cost weights
+
+
+        # Cost weights
         self.Q_pos = np.diag([80.0, 80.0])     # position [x,z]
-        self.Q_phi = 20.0                      # orientation
-        self.Q_vel = 0.1 * np.eye(3)           # joint velocities
-        self.R = 0.01 * np.eye(3)              # control effort
-        self.Rd = 0.1 * np.eye(3)              # move suppression Δu
+        self.Q_phi = 20.0                      # orientation about end-effector
+        self.Q_vel = 0.1 * np.eye(self.ndof)   # joint & yaw velocities
+        self.R = 0.01 * np.eye(self.ndof)      # control effort
+        self.Rd = 0.1 * np.eye(self.ndof)      # move suppression Δu
 
         # Simple joint limits (rad) – 可以根据你真实模型调整
-        # 先用比较宽的关节范围，保证 x0 在可行域里
-        # 以后你可以根据真实机械结构再收紧
+        # 先用比较宽的关节范围，保证 x0 在可行域里  
+        # 以后你可以根据真实机械结构再收紧  
         self.q_min = np.array([-3.14, -3.14, -3.14])
         self.q_max = np.array([ 3.14,  3.14,  3.14])
 
@@ -112,75 +130,85 @@ class NLP:
     # ------------------------------------------------------------------
     # OCP construction（暂时不加任何上下界约束，先保证问题可行）
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # OCP construction (now with 4-DOF state including base yaw)
+    # ------------------------------------------------------------------
     def _build_ocp(self):
         J = 0
-        # 上一个控制输入，用于 Δu 惩罚项
         previous_u = csd.MX.zeros(self.nu, 1)
 
-        # 初始状态约束：x(0) = x0
+        # Initial state constraint
         self.opti.subject_to(self.x[:, 0] == self.x0)
 
-        # --- 阶段代价 + 动力学约束 ---
         for k in range(N):
             xk = self.x[:, k]
             uk = self.u[:, k]
-            qk = xk[0:3]
-            qDotk = xk[3:6]
 
-            # 正运动学：q -> [x, z, phi]
-            pose_k = mod.forwardKinematics(qk)
+            # Full generalized coordinates/velocities (yaw + 3 joints)
+            q_full = xk[0:self.ndof]
+            qDot_full = xk[self.ndof:2 * self.ndof]
 
-            # 跟踪误差
-            e_pos = pose_k[0:2] - self.poseDesired[0:2]   # 位置 [x,z]
-            e_phi = pose_k[2] - self.poseDesired[2]       # 姿态 phi
+            # For planar kinematics we only use the arm joints (skip yaw)
+            q_joints = q_full[1:4]
+            qDot_joints = qDot_full[1:4]
 
-            # 阶段代价
+            # Planar forward kinematics from current joint angles
+            # excavatorModel.forwardKinematics(q) must return [x,z,phi]
+            pose_k = mod.forwardKinematics(q_joints)
+
+            # Tracking error in the boom plane
+            e_pos = pose_k[0:2] - self.poseDesired[0:2]
+            e_phi = pose_k[2] - self.poseDesired[2]
+
+            # Stage cost:
+            #  - end-effector position/orientation tracking
+            #  - penalise ALL velocities (including yawDot)
+            #  - penalise ALL accelerations (including yawDDot)
+            #  - penalise control variation Δu
             J += (
-                csd.mtimes([e_pos.T, self.Q_pos, e_pos])      # 末端位置误差
-                + self.Q_phi * e_phi ** 2                     # 末端姿态误差
-                + csd.mtimes([qDotk.T, self.Q_vel, qDotk])    # 关节速度
-                + csd.mtimes([uk.T, self.R, uk])              # 控制能量
-                + csd.mtimes([(uk - previous_u).T, self.Rd, (uk - previous_u)])  # 控制变化
+                csd.mtimes([e_pos.T, self.Q_pos, e_pos])
+                + self.Q_phi * e_phi ** 2
+                + csd.mtimes([qDot_full.T, self.Q_vel, qDot_full])
+                + csd.mtimes([uk.T, self.R, uk])
+                + csd.mtimes([(uk - previous_u).T, self.Rd, (uk - previous_u)])
             )
 
-            # 简单双积分动力学 x_{k+1} = f(x_k, u_k)
-            x_next = integrator(xk, uk)
+            # Simple double-integrator dynamics in joint space (4 DOF)
+            x_next = integrator(xk, uk, Ts)
             self.opti.subject_to(self.x[:, k + 1] == x_next)
 
             previous_u = uk
 
-        # --- 终端代价（只罚跟踪和速度，不罚 Δu） ---
+        # Terminal cost – same structure as stage cost but without Δu term
         xN = self.x[:, N]
-        qN = xN[0:3]
-        qDotN = xN[3:6]
+        q_full_N = xN[0:self.ndof]
+        qDot_full_N = xN[self.ndof:2 * self.ndof]
 
-        pose_N = mod.forwardKinematics(qN)
+        q_joints_N = q_full_N[1:4]
+        pose_N = mod.forwardKinematics(q_joints_N)
+
         e_posN = pose_N[0:2] - self.poseDesired[0:2]
         e_phiN = pose_N[2] - self.poseDesired[2]
 
         J += (
             csd.mtimes([e_posN.T, self.Q_pos, e_posN])
             + self.Q_phi * e_phiN ** 2
-            + csd.mtimes([qDotN.T, self.Q_vel, qDotN])
+            + csd.mtimes([qDot_full_N.T, self.Q_vel, qDot_full_N])
         )
 
-        # 设置目标函数
         self.opti.minimize(J)
 
-        # Ipopt 配置（可以先保持安静一点）
+        # Solver options
         ipopt_opts = {
             "max_iter": 80,
-            "print_level": 0,         # 0=最安静；你想看详细输出可以改成 5
-            "tol": 1e-4,
-            "acceptable_tol": 1e-3,
-            "acceptable_obj_change_tol": 1e-3,
+            "print_level": 0,
         }
         opts = {
             "ipopt": ipopt_opts,
-            "print_time": False,
+            "print_time": 0,
         }
         self.opti.solver("ipopt", opts)
-  
+
     # ------------------------------------------------------------------
     # Solve the MPC problem for current state & desired pose
     # ------------------------------------------------------------------

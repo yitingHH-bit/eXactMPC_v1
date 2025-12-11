@@ -10,15 +10,45 @@ class DutyCycle(Enum):
     PEAK = 3
 
 
-def forwardKinematics(q):
+# def forwardKinematics(q):
+#     alpha = q[0]
+#     beta = q[1]
+#     gamma = q[2]
+
+#     x = C.lenBA * csd.cos(alpha) + C.lenAL * csd.cos(alpha + beta) + C.lenLM * csd.cos(alpha + beta + gamma)
+#     y = C.lenBA * csd.sin(alpha) + C.lenAL * csd.sin(alpha + beta) + C.lenLM * csd.sin(alpha + beta + gamma)
+#     theta = alpha + beta + gamma
+#     return csd.vertcat(x, y, theta)
+
+def forwardKinematicsPlanar(q):
+    """
+    2D 正运动学：q = [alpha, beta, gamma]
+    使用 excavatorConstants 里的连杆长度:
+        lenBA, lenAL, lenLM
+    返回: [x, z, phi]
+    """
     alpha = q[0]
     beta = q[1]
     gamma = q[2]
 
-    x = C.lenBA * csd.cos(alpha) + C.lenAL * csd.cos(alpha + beta) + C.lenLM * csd.cos(alpha + beta + gamma)
-    y = C.lenBA * csd.sin(alpha) + C.lenAL * csd.sin(alpha + beta) + C.lenLM * csd.sin(alpha + beta + gamma)
-    theta = alpha + beta + gamma
-    return csd.vertcat(x, y, theta)
+    x = (
+        C.lenBA * csd.cos(alpha)
+        + C.lenAL * csd.cos(alpha + beta)
+        + C.lenLM * csd.cos(alpha + beta + gamma)
+    )
+    z = (
+        C.lenBA * csd.sin(alpha)
+        + C.lenAL * csd.sin(alpha + beta)
+        + C.lenLM * csd.sin(alpha + beta + gamma)
+    )
+    phi = alpha + beta + gamma
+
+    return csd.vertcat(x, z, phi)
+
+
+# 兼容旧项目名字：旧代码里直接叫 forwardKinematics(q)
+def forwardKinematics(q):
+    return forwardKinematicsPlanar(q)
 
 
 def inverseKinematics(pose):
@@ -372,7 +402,6 @@ def actuatorVel(q, qDot):
 
     return csd.vertcat(lenBoomDot, lenArmDot, lenBucketDot)
 
-
 def motorVel(q, qDot):
     lenDot = actuatorVel(q, qDot)
     lenBoomDot = lenDot[0]
@@ -440,5 +469,5 @@ def motorTorqueLimit(motorVel, dutyCycle: DutyCycle):
     T_lim_boom = T_rated * factor * scaleBoom
     T_lim_arm = T_rated * factor * scaleArm
     T_lim_bucket = T_rated * factor * scaleBucket
-    
+
     return csd.vertcat(T_lim_boom, T_lim_arm, T_lim_bucket)

@@ -25,56 +25,33 @@ def motor_commands(x, u):
     与 MPCSimulation_modify.py 中 motorCommands 同思路：
     在一个 Ts 内，用小步长 TMotor 对 NLPSolver 的简化积分器细分积分，
     然后再通过 excavatorModel 的函数把电机角速度转换成关节速度。
-
-    现在的状态/控制结构为 4-DOF：
-        x = [yaw, q1, q2, q3, yawDot, qDot1, qDot2, qDot3]^T
-        u = [yawDDot, qDDot1, qDDot2, qDDot3]^T
     """
     TMotor = 0.001
     NMotor = int(Ts / TMotor)
 
-    # 当前位置下的“机械臂关节”部分（忽略 yaw）
-    q_joints = x[1:4]
-
     # 当前位置下的油缸长度
-    actuatorLenPrev = mod.actuatorLen(q_joints)
+    actuatorLenPrev = mod.actuatorLen(x[0:3])
 
     deltaActuatorLen = 0
     motorSpdFinal = 0
 
-    xInterpolate = x
     for i in range(NMotor):
         tau = (i + 1) * TMotor
-        # 使用 NLPSolver 中的一般 n-DOF integrator 作为“植物”
+        # 使用 NLPSolver 中的 integrator（简单二阶积分）作为“植物”
         xInterpolate = integrator(x, u, tau)
-
-        # 取出其中的 3 个机械关节，用于电机速度映射
-        q_full = xInterpolate[0:4]
-        qDot_full = xInterpolate[4:8]
-        q_j = q_full[1:4]
-        qDot_j = qDot_full[1:4]
-
-        motorSpd = mod.motorVel(q_j, qDot_j)
+        motorSpd = mod.motorVel(xInterpolate[0:3], xInterpolate[3:6])
         deltaMotorAng = TMotor * motorSpd
         deltaActuatorLen += deltaMotorAng / 2444.16
 
         if i == NMotor - 1:
             motorSpdFinal = motorSpd
 
-    # 由执行器长度变化 -> 新的 3 DOF 关节角/角速度
     actuatorLenNew = actuatorLenPrev + deltaActuatorLen
     actuatorVelNew = motorSpdFinal / 2444.16
     qNew = mod.jointAngles(actuatorLenNew)
     qDotNew = mod.jointVel(qNew, actuatorVelNew)
 
-    # yaw 分量沿用 integrator 在 Ts 处的结果
-    yaw_next = xInterpolate[0]
-    yawDot_next = xInterpolate[4]
-
-    q_full_new = csd.vertcat(yaw_next, qNew)
-    qDot_full_new = csd.vertcat(yawDot_next, qDotNew)
-
-    return csd.vertcat(q_full_new, qDot_full_new)
+    return csd.vertcat(qNew, qDotNew)
 
 
 class ExcavatorRealtimeGUI:
@@ -113,7 +90,7 @@ class ExcavatorRealtimeGUI:
         status_label = ttk.Label(controls, textvariable=self.status_var)
         status_label.pack(side=tk.LEFT, padx=10)
 
-        # ------ 底座 yaw 控制滑条（用于初始 yaw）------
+        # ------ 底座 yaw 控制滑条 ------
         self.yaw_var = tk.DoubleVar()
         self.yaw_var.set(0.0)  # 初始 0 度
         yaw_scale = tk.Scale(
@@ -122,23 +99,14 @@ class ExcavatorRealtimeGUI:
             to=180,
             orient=tk.HORIZONTAL,
             variable=self.yaw_var,
-            label="Base yaw init [deg]",
-            length=180,
+            label="Base yaw [deg]",
+            length=200,
         )
-        yaw_scale.pack(side=tk.LEFT, padx=5)
-
-        # ------ 外力输入（可调）------
-        self.extF = 1000.0        # LIFT 模式的外力（用于可视化箭头长度）
-        self.extF_var = tk.DoubleVar(value=self.extF)
-        ttk.Label(controls, text="ExtF [N]:").pack(side=tk.LEFT)
-        ext_entry = ttk.Entry(controls, textvariable=self.extF_var, width=7)
-        ext_entry.pack(side=tk.LEFT, padx=2)
-
-        apply_btn = ttk.Button(controls, text="↺ Apply inputs", command=self.apply_inputs)
-        apply_btn.pack(side=tk.LEFT, padx=5)
+        yaw_scale.pack(side=tk.LEFT, padx=10)
 
         # ========== MPC / 仿真状态 ==========
         self.mode = Mode.LIFT
+        self.extF = 1000.0        # LIFT 模式的外力（用于可视化箭头长度）
         self.dutyCycle = DutyCycle.S2_30
 
         self.TSim = 5.0
@@ -148,89 +116,29 @@ class ExcavatorRealtimeGUI:
         self.poseDesired = csd.vertcat(3.2, C.yGround, -0.8)
         self.qDesired = mod.inverseKinematics(self.poseDesired)
 
-        # 初始状态：
-        # x = [yaw, q1, q2, q3, yawDot, qDot1, qDot2, qDot3]
-        yaw0 = math.radians(float(self.yaw_var.get()))
-        self.x0 = csd.vertcat(
-            yaw0,
-            1.0, -2.2, -1.8,
-            0.0, 0.0, 0.0, 0.0
-        )
+        # 初始状态 x = [q, qdot]
+        self.x0 = csd.vertcat(1.0, -2.2, -1.8, 0.0, 0.0, 0.0)
 
         self.running = False
         self.k = 0
         self.x = self.x0
 
-        # 末端轨迹记录
+        # 末端轨迹记录：每帧存一个 tip 的 3D 坐标
         self.tip_traj = []
 
-        # ========== 状态 / I/O 显示面板 ==========
-        info = ttk.LabelFrame(self.root, text="State / I-O Monitor")
-        info.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
-
-        self.t_var = tk.StringVar(value="0.00")
-        self.k_var = tk.StringVar(value="0")
-        self.yaw_state_deg_var = tk.StringVar(value="0.0")
-        self.q1_deg_var = tk.StringVar(value="0.0")
-        self.q2_deg_var = tk.StringVar(value="0.0")
-        self.q3_deg_var = tk.StringVar(value="0.0")
-        self.tip_x_var = tk.StringVar(value="0.00")
-        self.tip_y_var = tk.StringVar(value="0.00")
-        self.tip_z_var = tk.StringVar(value="0.00")
-        self.extF_state_var = tk.StringVar(value=f"{self.extF:.1f}")
-
-        # Row 0: time / step
-        ttk.Label(info, text="t [s]:").grid(row=0, column=0, sticky="w")
-        ttk.Label(info, textvariable=self.t_var, width=7).grid(row=0, column=1, sticky="w")
-        ttk.Label(info, text="k:").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        ttk.Label(info, textvariable=self.k_var, width=5).grid(row=0, column=3, sticky="w")
-
-        # Row 1: yaw & init yaw
-        ttk.Label(info, text="yaw_state [deg]:").grid(row=1, column=0, sticky="w")
-        ttk.Label(info, textvariable=self.yaw_state_deg_var, width=7).grid(row=1, column=1, sticky="w")
-        ttk.Label(info, text="yaw_init [deg]:").grid(row=1, column=2, sticky="w", padx=(10, 0))
-        ttk.Label(info, textvariable=self.yaw_var, width=7).grid(row=1, column=3, sticky="w")
-
-        # Row 2: joint angles
-        ttk.Label(info, text="q1,q2,q3 [deg]:").grid(row=2, column=0, sticky="w")
-        ttk.Label(info, textvariable=self.q1_deg_var, width=6).grid(row=2, column=1, sticky="w")
-        ttk.Label(info, textvariable=self.q2_deg_var, width=6).grid(row=2, column=2, sticky="w")
-        ttk.Label(info, textvariable=self.q3_deg_var, width=6).grid(row=2, column=3, sticky="w")
-
-        # Row 3: tip position
-        ttk.Label(info, text="tip (X,Y,Z) [m]:").grid(row=3, column=0, sticky="w")
-        ttk.Label(info, textvariable=self.tip_x_var, width=6).grid(row=3, column=1, sticky="w")
-        ttk.Label(info, textvariable=self.tip_y_var, width=6).grid(row=3, column=2, sticky="w")
-        ttk.Label(info, textvariable=self.tip_z_var, width=6).grid(row=3, column=3, sticky="w")
-
-        # Row 4: external force
-        ttk.Label(info, text="ExtF [N]:").grid(row=4, column=0, sticky="w")
-        ttk.Label(info, textvariable=self.extF_state_var, width=7).grid(row=4, column=1, sticky="w")
-
         # 初始画一帧
-        x0_np = np.array(self.x, dtype=float).reshape(-1)
-        self.draw_frame(x0_np, t=0.0)
-
-    # ---------- 应用输入参数（外力等） ----------
-    def apply_inputs(self):
-        try:
-            self.extF = float(self.extF_var.get())
-            self.extF_state_var.set(f"{self.extF:.1f}")
-            self.status_var.set(f"Inputs applied: ExtF={self.extF:.1f} N")
-        except Exception:
-            self.status_var.set("Failed to parse inputs.")
+        q0 = np.array(self.x[0:3], dtype=float).reshape(-1)
+        self.draw_frame(q0, t=0.0)
 
     # ---------- 运动学：计算关节点 3D 坐标 ----------
-    def link_positions_3d(self, yaw, q):
+    def link_positions_3d(self, q):
         """
         用原来 2D 模型 [boom, arm, bucket] 在 x–z 平面上的几何，
-        然后绕 Z 轴旋转 yaw 放到 3D 世界坐标中显示。
-        yaw  : 底座/上车绕世界 Z 轴的偏航角（来自 MPC 状态）
-        q    : [alpha, beta, gamma] 机械臂三个关节角
+        然后通过绕 Z 轴的 yaw 旋转放到 3D 里显示。
         """
         alpha, beta, gamma = float(q[0]), float(q[1]), float(q[2])
 
-        # 在 cabin 坐标系下（Y=0）的 3 个连杆几何
+        # 先在 X–Z 平面（Y = 0）下计算 3 个连杆的几何
         p0 = np.array([0.0, 0.0, 0.0])
         p1 = p0 + np.array(
             [LEN_BA * math.cos(alpha), 0.0, LEN_BA * math.sin(alpha)]
@@ -246,9 +154,14 @@ class ExcavatorRealtimeGUI:
 
         pts = np.vstack([p0, p1, p2, p3])
 
-        # 绕世界 Z 轴旋转：底座 yaw（来自状态）
-        yaw_rad = float(yaw)
-        cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
+        # 底座 yaw：绕世界 Z 轴旋转
+        try:
+            yaw_deg = float(self.yaw_var.get())
+        except Exception:
+            yaw_deg = 0.0
+        yaw = math.radians(yaw_deg)
+
+        cy, sy = math.cos(yaw), math.sin(yaw)
         R = np.array([
             [cy, -sy, 0.0],
             [sy,  cy, 0.0],
@@ -259,31 +172,13 @@ class ExcavatorRealtimeGUI:
         return pts_rot
 
     # ---------- 画一帧 ----------
-    def draw_frame(self, x_vec, t):
-        """
-        x_vec: 当前 8 维状态向量（numpy / CasADi / list 都可以）
-        """
-        x_arr = np.array(x_vec, dtype=float).reshape(-1)
-        yaw = x_arr[0]
-        q = x_arr[1:4]
-
-        pts = self.link_positions_3d(yaw, q)
+    def draw_frame(self, q, t):
+        pts = self.link_positions_3d(q)
         X, Y, Z = pts[:, 0], pts[:, 1], pts[:, 2]
 
         # 记录末端轨迹
         tip = pts[-1].copy()
         self.tip_traj.append(tip)
-
-        # ==== 更新右侧参数显示 ====
-        self.t_var.set(f"{t:.2f}")
-        self.k_var.set(str(self.k))
-        self.yaw_state_deg_var.set(f"{math.degrees(yaw):.1f}")
-        self.q1_deg_var.set(f"{math.degrees(q[0]):.1f}")
-        self.q2_deg_var.set(f"{math.degrees(q[1]):.1f}")
-        self.q3_deg_var.set(f"{math.degrees(q[2]):.1f}")
-        self.tip_x_var.set(f"{tip[0]:.2f}")
-        self.tip_y_var.set(f"{tip[1]:.2f}")
-        self.tip_z_var.set(f"{tip[2]:.2f}")
 
         self.ax.cla()
 
@@ -293,10 +188,8 @@ class ExcavatorRealtimeGUI:
         # 末端轨迹（虚线）
         if len(self.tip_traj) > 1:
             traj = np.vstack(self.tip_traj)
-            self.ax.plot(
-                traj[:, 0], traj[:, 1], traj[:, 2],
-                "--", linewidth=1, label="tip trajectory"
-            )
+            self.ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
+                         "--", linewidth=1, label="tip trajectory")
 
         # 外力方向箭头（在 tip 上）
         force_dir = None
@@ -354,6 +247,8 @@ class ExcavatorRealtimeGUI:
         1) 用当前 x 建 NLP
         2) solveNLP 得到 u0
         3) 用 motor_commands 推进到 x_{k+1}
+
+        这里保留错误信息，让你在终端里能看到具体异常。
         """
         if self.k >= self.NSim:
             self.status_var.set(f"Finished: k={self.k} >= NSim={self.NSim}")
@@ -369,8 +264,7 @@ class ExcavatorRealtimeGUI:
             return False
 
         try:
-            # 4-DOF: u0 是 (4,)
-            u0 = sol.value(opti.u[:, 0])
+            u0 = sol.value(opti.u[:, 0])  # (3,)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -404,8 +298,8 @@ class ExcavatorRealtimeGUI:
             return
 
         t = self.k * Ts
-        x_np = np.array(self.x, dtype=float).reshape(-1)
-        self.draw_frame(x_np, t)
+        q = np.array(self.x[0:3], dtype=float).reshape(-1)
+        self.draw_frame(q, t)
 
         self.root.after(10, self.update_frame)
 
@@ -429,21 +323,11 @@ class ExcavatorRealtimeGUI:
         if self.running:
             self.stop_simulation()
         self.k = 0
-
-        # 根据当前滑条重置初始 yaw
-        yaw0 = math.radians(float(self.yaw_var.get()))
-        self.x0 = csd.vertcat(
-            yaw0,
-            1.0, -2.2, -1.8,
-            0.0, 0.0, 0.0, 0.0
-        )
         self.x = self.x0
-
         # 重置轨迹
         self.tip_traj = []
-
-        x0_np = np.array(self.x, dtype=float).reshape(-1)
-        self.draw_frame(x0_np, t=0.0)
+        q0 = np.array(self.x[0:3], dtype=float).reshape(-1)
+        self.draw_frame(q0, t=0.0)
         self.status_var.set("Reset to initial state.")
 
 
@@ -451,6 +335,7 @@ def main():
     root = tk.Tk()
     app = ExcavatorRealtimeGUI(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

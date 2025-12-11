@@ -19,7 +19,6 @@ LEN_AL = float(C.lenAL)   # boom → arm
 LEN_LM = float(C.lenLM)   # arm → tip
 TOTAL_LEN = LEN_BA + LEN_AL + LEN_LM
 
-
 def motor_commands(x, u):
     """
     与 MPCSimulation_modify.py 中 motorCommands 同思路：
@@ -451,6 +450,7 @@ def main():
     root = tk.Tk()
     app = ExcavatorRealtimeGUI(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

@@ -3,6 +3,8 @@ from enum import Enum
 import numpy as np
 
 import excavatorModel as mod
+from excavatorModel import DutyCycle
+
 
 # Prediction horizon (seconds) and steps
 T = 2.0
@@ -58,7 +60,10 @@ class NLP:
         # currently not used directly in the cost.
         self.mode = mode
         self.ext_force = float(ext_force)
-        self.duty_cycle = float(duty_cycle)
+        if isinstance(duty_cycle, DutyCycle):
+            self.duty_cycle = float(duty_cycle.value)
+        else:
+            self.duty_cycle = float(duty_cycle)
 
         # Dimensions
         self.nx = 6   # [q1,q2,q3,qDot1,qDot2,qDot3]
@@ -83,8 +88,10 @@ class NLP:
         self.Rd = 0.1 * np.eye(3)              # move suppression Δu
 
         # Simple joint limits (rad) – 可以根据你真实模型调整
-        self.q_min = np.array([-0.2, -0.6, -1.3])
-        self.q_max = np.array([1.4,  1.4,  0.2])
+        # 先用比较宽的关节范围，保证 x0 在可行域里
+        # 以后你可以根据真实机械结构再收紧
+        self.q_min = np.array([-3.14, -3.14, -3.14])
+        self.q_max = np.array([ 3.14,  3.14,  3.14])
 
         # Velocity & acceleration limits
         self.qDot_min = -2.0 * np.ones(3)
@@ -102,56 +109,51 @@ class NLP:
     # ------------------------------------------------------------------
     # OCP construction
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # OCP construction（暂时不加任何上下界约束，先保证问题可行）
+    # ------------------------------------------------------------------
     def _build_ocp(self):
         J = 0
+        # 上一个控制输入，用于 Δu 惩罚项
         previous_u = csd.MX.zeros(self.nu, 1)
 
-        # Initial state constraint
+        # 初始状态约束：x(0) = x0
         self.opti.subject_to(self.x[:, 0] == self.x0)
 
+        # --- 阶段代价 + 动力学约束 ---
         for k in range(N):
             xk = self.x[:, k]
             uk = self.u[:, k]
             qk = xk[0:3]
             qDotk = xk[3:6]
 
-            # Planar forward kinematics from current joint angles
-            # excavatorModel.forwardKinematics(q) must return [x,z,phi]
+            # 正运动学：q -> [x, z, phi]
             pose_k = mod.forwardKinematics(qk)
 
-            # Tracking error
-            e_pos = pose_k[0:2] - self.poseDesired[0:2]
-            e_phi = pose_k[2] - self.poseDesired[2]
+            # 跟踪误差
+            e_pos = pose_k[0:2] - self.poseDesired[0:2]   # 位置 [x,z]
+            e_phi = pose_k[2] - self.poseDesired[2]       # 姿态 phi
 
-            # Stage cost
+            # 阶段代价
             J += (
-                csd.mtimes([e_pos.T, self.Q_pos, e_pos])
-                + self.Q_phi * e_phi ** 2
-                + csd.mtimes([qDotk.T, self.Q_vel, qDotk])
-                + csd.mtimes([uk.T, self.R, uk])
-                + csd.mtimes([(uk - previous_u).T, self.Rd, (uk - previous_u)])
+                csd.mtimes([e_pos.T, self.Q_pos, e_pos])      # 末端位置误差
+                + self.Q_phi * e_phi ** 2                     # 末端姿态误差
+                + csd.mtimes([qDotk.T, self.Q_vel, qDotk])    # 关节速度
+                + csd.mtimes([uk.T, self.R, uk])              # 控制能量
+                + csd.mtimes([(uk - previous_u).T, self.Rd, (uk - previous_u)])  # 控制变化
             )
+
+            # 简单双积分动力学 x_{k+1} = f(x_k, u_k)
+            x_next = integrator(xk, uk)
+            self.opti.subject_to(self.x[:, k + 1] == x_next)
 
             previous_u = uk
 
-            # Dynamics: x_{k+1} = f(x_k, u_k)
-            x_next = integrator(xk, uk, Ts)
-            self.opti.subject_to(self.x[:, k + 1] == x_next)
-
-            # State / input bounds
-            self.opti.subject_to(self.q_min <= qk)
-            self.opti.subject_to(qk <= self.q_max)
-
-            self.opti.subject_to(self.qDot_min <= qDotk)
-            self.opti.subject_to(qDotk <= self.qDot_max)
-
-            self.opti.subject_to(self.u_min <= uk)
-            self.opti.subject_to(uk <= self.u_max)
-
-        # Terminal cost (only tracking, no Δu penalty)
+        # --- 终端代价（只罚跟踪和速度，不罚 Δu） ---
         xN = self.x[:, N]
         qN = xN[0:3]
         qDotN = xN[3:6]
+
         pose_N = mod.forwardKinematics(qN)
         e_posN = pose_N[0:2] - self.poseDesired[0:2]
         e_phiN = pose_N[2] - self.poseDesired[2]
@@ -162,19 +164,23 @@ class NLP:
             + csd.mtimes([qDotN.T, self.Q_vel, qDotN])
         )
 
+        # 设置目标函数
         self.opti.minimize(J)
 
-        # Solver options
+        # Ipopt 配置（可以先保持安静一点）
         ipopt_opts = {
             "max_iter": 80,
-            "print_level": 0,
+            "print_level": 0,         # 0=最安静；你想看详细输出可以改成 5
+            "tol": 1e-4,
+            "acceptable_tol": 1e-3,
+            "acceptable_obj_change_tol": 1e-3,
         }
         opts = {
             "ipopt": ipopt_opts,
-            "print_time": 0,
+            "print_time": False,
         }
         self.opti.solver("ipopt", opts)
-
+  
     # ------------------------------------------------------------------
     # Solve the MPC problem for current state & desired pose
     # ------------------------------------------------------------------
