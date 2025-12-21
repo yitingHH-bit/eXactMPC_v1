@@ -145,7 +145,7 @@ class ExcavatorRealtimeGUI:
         self.NSim = int(self.TSim / Ts)
 
         # 目标末端位姿：仍然是 2D [x, z, phi]
-        self.poseDesired = csd.vertcat(0.6, C.yGround, -0.8)
+        self.poseDesired = csd.vertcat(0.6, C.yGround, -0.5)
         self.qDesired = mod.inverseKinematics(self.poseDesired)
 
         # 初始状态：
@@ -252,7 +252,7 @@ class ExcavatorRealtimeGUI:
             [sy,  cy, 0.0],
             [0.0, 0.0, 1.0],
         ])
-
+        print("Segment lengths (URDF-based):", LEN_BA, LEN_AL, LEN_LM)
         pts_rot = pts @ R.T
         return pts_rot
 
