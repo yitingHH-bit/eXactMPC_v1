@@ -1,0 +1,92 @@
+<robot name="excavatorModel">
+    <link name="base"/>
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <mass value="1e6"/>
+            <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="1e-6"/>
+        </inertial>
+  
+    <link name="boom">
+        <inertial>
+            <origin xyz="1.025 0 0.384" rpy="0 0 0"/>
+            <mass value="227.343"/>
+            <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="67.768" iyz="0.0" izz="1e-6"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="package://boom.dae"/>
+            </geometry>
+            <material name="grey">
+                <color rgba="0.8 0.8 0.8 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <link name="arm">
+        <inertial>
+            <origin xyz="0.225 0 0.227" rpy="0 0 0"/>
+            <mass value="130.123"/>
+            <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="30.258" iyz="0.0" izz="1e-6"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="package://arm.dae"/>
+            </geometry>
+            <material name="grey">
+                <color rgba="0.8 0.8 0.8 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <link name="bucket">
+        <inertial>
+            <origin xyz="0.289 0 0.166" rpy="0 0 0"/>
+            <mass value="53.000"/>
+            <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="3.021" iyz="0.0" izz="1e-6"/>
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="package://bucket.dae"/>
+            </geometry>
+            <material name="grey">
+                <color rgba="0.8 0.8 0.8 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <link name="tip">
+    </link>
+
+    <joint name="jointBoom" type="revolute">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <parent link="base"/>
+        <child link="boom"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="-1e6" upper="1e6" effort="1e6" velocity="1e6"/>
+    </joint>
+
+    <joint name="jointArm" type="revolute">
+        <origin xyz="2.050 0 0" rpy="0 0 0"/>
+        <parent link="boom"/>
+        <child link="arm"/>
+        <axis xyz="0 1 0" />
+        <limit lower="-1e6" upper="1e6" effort="1e6" velocity="1e6"/>
+    </joint>
+
+    <joint name="jointBucket" type="revolute">
+        <origin xyz="1.050 0 0" rpy="0 0 0"/>
+        <parent link="arm"/>
+        <child link="bucket"/>
+        <axis xyz="0 1 0" />
+        <limit lower="-1e6" upper="1e6" effort="1e6" velocity="1e6"/> 
+    </joint>
+
+    <joint name="tipBucket" type="fixed">
+        <origin xyz="0.567 0 0" rpy="0 0 0"/>
+        <parent link="bucket"/>
+        <child link="tip"/>
+    </joint>
+</robot>

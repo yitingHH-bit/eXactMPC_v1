@@ -23,7 +23,6 @@
         </visual>
     </link>
 
-  
     <link name="arm">
         <inertial>
             <origin xyz="0.225 0 0.227" rpy="0 0 0"/>

@@ -31,19 +31,24 @@ def forwardKinematicsPlanar(q):
     beta = q[1]
     gamma = q[2]
 
-    x = (
-        C.L1 * csd.cos(alpha)
-        + C.L2 * csd.cos(alpha + beta)
-        + C.L3 * csd.cos(alpha + beta + gamma)
-    )
-    z = (
-        C.L1 * csd.sin(alpha)
-        + C.L2 * csd.sin(alpha + beta)
-        + C.L3 * csd.sin(alpha + beta + gamma)
-    )
+    # URDF-fitted kinematics with link direction offsets (OFF1/OFF2)
+    # and a TCP offset vector (TCP_DX/TCP_DZ) expressed in the tool_body frame.
+    #
+    #   p_tool = R(alpha) v1 + R(alpha+beta) v2
+    #   p_tcp  = p_tool + R(phi) v_tcp
+    #   phi    = alpha + beta + gamma
+
     phi = alpha + beta + gamma
 
-    return csd.vertcat(x, z, phi)
+    # Link vectors are not aligned with +X when joint angle = 0, so we add OFF1/OFF2.
+    x_tool = C.L1 * csd.cos(alpha + C.OFF1) + C.L2 * csd.cos(alpha + beta + C.OFF2)
+    z_tool = C.L1 * csd.sin(alpha + C.OFF1) + C.L2 * csd.sin(alpha + beta + C.OFF2)
+
+    # TCP offset (dx, dz) in tool frame
+    x_tcp = x_tool + (C.TCP_DX * csd.cos(phi) - C.TCP_DZ * csd.sin(phi))
+    z_tcp = z_tool + (C.TCP_DX * csd.sin(phi) + C.TCP_DZ * csd.cos(phi))
+
+    return csd.vertcat(x_tcp, z_tcp, phi)
 
 
 # 兼容旧项目名字：旧代码里直接叫 forwardKinematics(q)
@@ -51,67 +56,49 @@ def forwardKinematics(q):
     return forwardKinematicsPlanar(q)
 
 
-def inverseKinematics(pose):
+def inverseKinematics(pose, elbow: str = "down"):
+    """Planar IK for the URDF-fitted model.
+
+    pose: [x, z, phi]
+    elbow: "down" (default) or "up" (chooses sign of sin(beta)).
+
+    Notes
+    -----
+    - Uses OFF1/OFF2 so the model matches URDF joint-to-joint *vectors*.
+    - Uses TCP_DX/TCP_DZ so the "tip" matches the gripper center.
+    - Clamps cos(beta) to avoid sqrt of negative due to numerical/target issues.
     """
-    2D 逆运动学：给末端 [x,z,phi]，求关节 [alpha,beta,gamma]
-    几何基于 L1,L2,L3（URDF 拟合）
-    """
-    xTip = pose[0]
-    yTip = pose[1]
-    thetaTip = pose[2]
+    x_tip = pose[0]
+    z_tip = pose[1]
+    phi = pose[2]
 
-    # 末端回退一段 L3 到 "腕关节"
-    xJointBucket = xTip - C.L3 * csd.cos(thetaTip)
-    yJointBucket = yTip - C.L3 * csd.sin(thetaTip)
+    # Back out the TCP offset to get the tool_body origin target.
+    x_tool = x_tip - (C.TCP_DX * csd.cos(phi) - C.TCP_DZ * csd.sin(phi))
+    z_tool = z_tip - (C.TCP_DX * csd.sin(phi) + C.TCP_DZ * csd.cos(phi))
 
-    # 二连杆逆解（参考 Siciliano 公式）
-    cosBeta = (
-        xJointBucket ** 2 + yJointBucket ** 2
-        - C.L1 ** 2 - C.L2 ** 2
-    ) / (2 * C.L1 * C.L2)
-    sinBeta = -csd.sqrt(1 - cosBeta ** 2)
+    # Reduce to a standard 2-link IK by absorbing fixed link offsets.
+    # Let A1 = alpha + OFF1, and B1 = beta + (OFF2 - OFF1).
+    # Then: p = L1*[cos(A1), sin(A1)] + L2*[cos(A1+B1), sin(A1+B1)].
+    L1 = C.L1
+    L2 = C.L2
+    eps = 1e-9
 
-    sinAlpha = (
-        (C.L1 + C.L2 * cosBeta) * yJointBucket
-        - C.L2 * sinBeta * xJointBucket
-    ) / (xJointBucket ** 2 + yJointBucket ** 2)
-    cosAlpha = (
-        (C.L1 + C.L2 * cosBeta) * xJointBucket
-        + C.L2 * sinBeta * yJointBucket
-    ) / (xJointBucket ** 2 + yJointBucket ** 2)
+    r2 = x_tool ** 2 + z_tool ** 2
+    cosB1 = (r2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cosB1 = csd.fmin(1.0 - eps, csd.fmax(-1.0 + eps, cosB1))
+    sinB1_abs = csd.sqrt(csd.fmax(0.0, 1 - cosB1 ** 2))
 
-    alpha = csd.atan2(sinAlpha, cosAlpha)
-    beta = csd.atan2(sinBeta, cosBeta)
-    gamma = thetaTip - alpha - beta
+    if elbow.lower() == "up":
+        sinB1 = sinB1_abs
+    else:
+        sinB1 = -sinB1_abs
 
-    return csd.vertcat(alpha, beta, gamma)
+    B1 = csd.atan2(sinB1, cosB1)
+    A1 = csd.atan2(z_tool, x_tool) - csd.atan2(L2 * sinB1, L1 + L2 * cosB1)
 
-
-
-
-def inverseKinematics(pose):
-    xTip = pose[0]
-    yTip = pose[1]
-    thetaTip = pose[2]
-
-    xJointBucket = xTip - C.lenLM * csd.cos(thetaTip)
-    yJointBucket = yTip - C.lenLM * csd.sin(thetaTip)
-
-    cosBeta = (xJointBucket ** 2 + yJointBucket ** 2 - C.lenBA ** 2 - C.lenAL ** 2) / (2 * C.lenBA * C.lenAL)
-    sinBeta = -csd.sqrt(1 - cosBeta ** 2)
-
-    sinAlpha = (
-        (C.lenBA + C.lenAL * cosBeta) * yJointBucket
-        - C.lenAL * sinBeta * xJointBucket
-    ) / (xJointBucket ** 2 + yJointBucket ** 2)
-    cosAlpha = (
-        (C.lenBA + C.lenAL * cosBeta) * xJointBucket
-        + C.lenAL * sinBeta * yJointBucket
-    ) / (xJointBucket ** 2 + yJointBucket ** 2)
-
-    alpha = csd.atan2(sinAlpha, cosAlpha)
-    beta = csd.atan2(sinBeta, cosBeta)
-    gamma = thetaTip - alpha - beta
+    alpha = A1 - C.OFF1
+    beta = B1 - C.OFF2 + C.OFF1
+    gamma = phi - alpha - beta
 
     return csd.vertcat(alpha, beta, gamma)
 
