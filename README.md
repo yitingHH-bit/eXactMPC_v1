@@ -33,3 +33,26 @@ Using pip3 to install opencv-python might not work due to the absence of the nec
 
 # MATLAB
 This program contains several useful functions for the excavator arm model which the kinematic MPC is built upon. The code runs as it is. The file to run is `simulation.m`.
+
+
+Ideas for RL updates:- +60/-60 log spawn is good! But maybe add random rog rotation around its Z origin (yaw)?- add win condition for faster training (env. reset (win) when log is above x meters).Final evaluation- run trained model in play mode (...scripts/reinforcement_learning/rl_games/play.py --task=...) to get smooth movement. Collect data from the play runs to get the final accuracy and performance metrics!![Uploading image.png…]()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
